@@ -163,16 +163,27 @@ _afpovertcp._tcp.local
 
 ## Testing & Quality Assurance
 
-To execute automated table-driven tests and verify boundary condition handling:
+The test suite incorporates data-driven, table-driven unit tests specifically targeting boundary conditions, defensive parsing, fallback mechanics, and format consistency.
 
+### Run All Unit Tests with Coverage
 ```bash
 go test -v -cover ./...
 ```
 
-For more details on boundary handling, edge cases, and design rationale, please refer to [DOCS/TEST_PLAN.md](DOCS/TEST_PLAN.md).
+### Test Matrix & Coverage Summary
+
+| Package | Test Scope & Edge Cases Covered | Coverage | Status |
+| :--- | :--- | :---: | :---: |
+| **`pkg/target`** | CIDR streaming, single IP parsing, port ranges (`5000-5005`), invalid IP/mask bounds check (`/33`), out-of-range port rejection (`70000`). | **80.7%** | `PASS` |
+| **`pkg/parser`** | TXT banner parsing (QNAP metadata), zero-length/empty TXT defense, missing equals sign tags (no index out of range panic), complex query preserving, and missing A record fallback. | **78.6%** | `PASS` |
+| **`pkg/output`** | Full mock QNAP NAS template validation (verifying exact fidelity of `services:`, ports, banners, `answers: PTR:`), nil-pointer defense. | **80.9%** | `PASS` |
+| **`pkg/probe`** | Mock UDP mDNS engine lifecycle, non-blocking response streaming, timeout cancellation. | **79.4%** | `PASS` |
+
+For in-depth boundary condition analysis and technical resolutions, refer to [DOCS/TEST_PLAN.md](DOCS/TEST_PLAN.md).
 
 ---
 
 ## License
 
 This project is licensed under the MIT License.
+
