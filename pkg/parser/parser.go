@@ -98,6 +98,8 @@ func DefaultPortForService(svc string) int {
 		return 548
 	case "http":
 		return 80
+	case "qdiscover":
+		return 5000
 	case "https":
 		return 443
 	case "device-info":
@@ -271,6 +273,7 @@ func (a *Aggregator) ProcessRawResponse(raw *probe.RawResponse) *DeviceAsset {
 		if serviceName == "" {
 			serviceName = asset.DefaultName
 		}
+		serviceName = unescapeDNS(serviceName)
 
 		banner := getBanner(txtByService, srv.Hdr.Name, svcType)
 
@@ -299,6 +302,18 @@ func (a *Aggregator) ProcessRawResponse(raw *probe.RawResponse) *DeviceAsset {
 	for _, ptr := range asset.Answers {
 		svcName, proto := parseServiceNameAndProto(ptr)
 		if svcName == "" || svcName == "dns-sd" || svcName == "services" {
+			continue
+		}
+
+		// If this service type is already covered by an SRV record, skip fallback
+		alreadyCovered := false
+		for _, s := range asset.Services {
+			if strings.EqualFold(s.Service, svcName) {
+				alreadyCovered = true
+				break
+			}
+		}
+		if alreadyCovered {
 			continue
 		}
 
@@ -331,6 +346,7 @@ func (a *Aggregator) ProcessRawResponse(raw *probe.RawResponse) *DeviceAsset {
 					serviceName = asset.DefaultName
 				}
 			}
+			serviceName = unescapeDNS(serviceName)
 
 			banner := getBanner(txtByService, ptr, svcType)
 
@@ -354,6 +370,18 @@ func (a *Aggregator) ProcessRawResponse(raw *probe.RawResponse) *DeviceAsset {
 	}
 
 	return asset
+}
+
+func unescapeDNS(s string) string {
+	s = strings.ReplaceAll(s, `\ `, " ")
+	s = strings.ReplaceAll(s, `\(`, "(")
+	s = strings.ReplaceAll(s, `\)`, ")")
+	s = strings.ReplaceAll(s, `\[`, "[")
+	s = strings.ReplaceAll(s, `\]`, "]")
+	s = strings.ReplaceAll(s, `\:`, ":")
+	s = strings.ReplaceAll(s, `\.`, ".")
+	s = strings.ReplaceAll(s, `\\`, `\`)
+	return s
 }
 
 func getBanner(txtMap map[string]string, names ...string) string {
