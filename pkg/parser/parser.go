@@ -3,7 +3,6 @@ package parser
 import (
 	"fmt"
 	"net"
-	"sort"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -14,7 +13,7 @@ import (
 type ServiceEntry struct {
 	Port     int    `json:"port"`
 	Proto    string `json:"proto"`   // tcp, udp
-	Service  string `json:"service"` // http, qdiscover, smb, workstation, etc.
+	Service  string `json:"service"` // workstation, http, smb, qdiscover, device-info, afpovertcp
 	FullName string `json:"full_name"`
 	Target   string `json:"target,omitempty"`
 	Name     string `json:"name,omitempty"`
@@ -22,36 +21,36 @@ type ServiceEntry struct {
 	IPv6     string `json:"ipv6,omitempty"`
 	Hostname string `json:"hostname,omitempty"`
 	TTL      uint32 `json:"ttl,omitempty"`
-	Banner   string `json:"banner,omitempty"` // Formatted as "model=TS-X64,fwVer=5.2.9"
+	Banner   string `json:"banner,omitempty"` // e.g. "path=/" or "accessType=https,accessPort=86,model=TS-X64..."
 }
 
-// FormatTag returns tag like "5000/tcp http:"
+// FormatTag returns the service title tag, e.g. "9/tcp workstation:" or "device-info:"
 func (s ServiceEntry) FormatTag() string {
+	svc := strings.ToLower(s.Service)
+	if svc == "device-info" || s.Port == 0 {
+		return "device-info:"
+	}
 	proto := strings.ToLower(s.Proto)
 	if proto == "" {
 		proto = "tcp"
 	}
-	svc := strings.ToLower(s.Service)
-	if svc == "" {
-		svc = "unknown"
-	}
 	return fmt.Sprintf("%d/%s %s:", s.Port, proto, svc)
 }
 
-// DeviceAsset aggregates all discovered services and metadata for an asset (IP + Hostname)
+// DeviceAsset aggregates all services and metadata for an asset
 type DeviceAsset struct {
-	IP       string                  `json:"ip"`
-	Hostname string                  `json:"hostname"`
-	Name     string                  `json:"name"`
-	IPv4     []string                `json:"ipv4"`
-	IPv6     []string                `json:"ipv6"`
-	TTL      uint32                  `json:"ttl"`
-	Answers  []string                `json:"answers"`  // answers: PTR:
-	Services map[string]ServiceEntry `json:"services"` // key: "port/proto service"
-	Banner   string                  `json:"banner"`   // Merged banner
+	IP          string                  `json:"ip"`
+	Hostname    string                  `json:"hostname"`
+	DefaultName string                  `json:"name"`
+	IPv4        []string                `json:"ipv4"`
+	IPv6        []string                `json:"ipv6"`
+	TTL         uint32                  `json:"ttl"`
+	Answers     []string                `json:"answers"`  // answers: PTR:
+	Services    map[string]ServiceEntry `json:"services"` // key: tag string
+	ServiceKeys []string                `json:"service_keys"`
 }
 
-// FormatTXTBanner parses TXT slice into "k1=v1,k2=v2" or "k1=v1,tag" safely without panic
+// FormatTXTBanner parses TXT records into comma-separated key=value or tag string
 func FormatTXTBanner(txtSlice []string) string {
 	if len(txtSlice) == 0 {
 		return ""
@@ -63,7 +62,6 @@ func FormatTXTBanner(txtSlice []string) string {
 		if raw == "" {
 			continue
 		}
-		// strings.SplitN with 2 avoids index out of range panic
 		parts := strings.SplitN(raw, "=", 2)
 		if len(parts) == 2 {
 			k := strings.TrimSpace(parts[0])
@@ -72,7 +70,6 @@ func FormatTXTBanner(txtSlice []string) string {
 				cleanItems = append(cleanItems, fmt.Sprintf("%s=%s", k, v))
 			}
 		} else {
-			// Single tag without '='
 			cleanItems = append(cleanItems, raw)
 		}
 	}
@@ -80,19 +77,39 @@ func FormatTXTBanner(txtSlice []string) string {
 	return strings.Join(cleanItems, ",")
 }
 
-// Aggregator aggregates responses from mDNS packets by (IP, Hostname)
+// Aggregator aggregates responses from mDNS packets by IP
 type Aggregator struct {
 	assets map[string]*DeviceAsset
 }
 
-// NewAggregator creates an aggregator instance
 func NewAggregator() *Aggregator {
 	return &Aggregator{
 		assets: make(map[string]*DeviceAsset),
 	}
 }
 
-// ProcessRawResponse merges a probe response into aggregated DeviceAssets
+func DefaultPortForService(svc string) int {
+	switch strings.ToLower(svc) {
+	case "workstation":
+		return 9
+	case "smb", "microsoft-ds":
+		return 445
+	case "afpovertcp":
+		return 548
+	case "http":
+		return 80
+	case "https":
+		return 443
+	case "device-info":
+		return 0
+	case "ssh":
+		return 22
+	default:
+		return 0
+	}
+}
+
+// ProcessRawResponse parses and aggregates mDNS packets
 func (a *Aggregator) ProcessRawResponse(raw *probe.RawResponse) *DeviceAsset {
 	if raw == nil || raw.Msg == nil {
 		return nil
@@ -104,13 +121,13 @@ func (a *Aggregator) ProcessRawResponse(raw *probe.RawResponse) *DeviceAsset {
 
 	var (
 		discoveredHostname string
-		discoveredName     string
 		discoveredTTL      uint32
 		ipv4List           []string
 		ipv6List           []string
 		answersPTR         []string
 		srvList            []*dns.SRV
 		txtByService       = make(map[string]string)
+		instanceNames      = make(map[string]string) // svcType -> instance Name
 	)
 
 	for _, rr := range allRRs {
@@ -119,10 +136,18 @@ func (a *Aggregator) ProcessRawResponse(raw *probe.RawResponse) *DeviceAsset {
 			discoveredTTL = header.Ttl
 		}
 
+		cleanHeaderName := strings.TrimSuffix(header.Name, ".")
+
 		switch v := rr.(type) {
 		case *dns.PTR:
 			ptrVal := strings.TrimSuffix(v.Ptr, ".")
 			answersPTR = appendUnique(answersPTR, ptrVal)
+
+			// If PTR points to an instance like "slw-nas._http._tcp.local"
+			instName, svcType := extractInstanceAndService(ptrVal)
+			if instName != "" && svcType != "" {
+				instanceNames[svcType] = instName
+			}
 
 		case *dns.SRV:
 			srvList = append(srvList, v)
@@ -130,25 +155,33 @@ func (a *Aggregator) ProcessRawResponse(raw *probe.RawResponse) *DeviceAsset {
 			if discoveredHostname == "" {
 				discoveredHostname = targetHost
 			}
+			instName, svcType := extractInstanceAndService(cleanHeaderName)
+			if instName != "" && svcType != "" {
+				instanceNames[svcType] = instName
+			}
 
 		case *dns.TXT:
 			bannerStr := FormatTXTBanner(v.Txt)
 			if bannerStr != "" {
-				txtByService[strings.TrimSuffix(header.Name, ".")] = bannerStr
+				txtByService[cleanHeaderName] = bannerStr
+				_, svcType := extractInstanceAndService(cleanHeaderName)
+				if svcType != "" {
+					txtByService[svcType] = bannerStr
+				}
 			}
 
 		case *dns.A:
 			ipStr := v.A.String()
 			ipv4List = appendUnique(ipv4List, ipStr)
 			if discoveredHostname == "" {
-				discoveredHostname = strings.TrimSuffix(header.Name, ".")
+				discoveredHostname = cleanHeaderName
 			}
 
 		case *dns.AAAA:
 			ipStr := v.AAAA.String()
 			ipv6List = appendUnique(ipv6List, ipStr)
 			if discoveredHostname == "" {
-				discoveredHostname = strings.TrimSuffix(header.Name, ".")
+				discoveredHostname = cleanHeaderName
 			}
 		}
 	}
@@ -168,31 +201,34 @@ func (a *Aggregator) ProcessRawResponse(raw *probe.RawResponse) *DeviceAsset {
 		}
 	}
 
-	if discoveredName == "" {
-		parts := strings.Split(discoveredHostname, ".")
-		discoveredName = parts[0]
+	// Extract clean host name (e.g. slw-nas from slw-nas.local)
+	cleanDefaultName := strings.TrimSuffix(discoveredHostname, ".local")
+	if strings.Contains(cleanDefaultName, ".") {
+		cleanDefaultName = strings.Split(cleanDefaultName, ".")[0]
 	}
 
-	// Asset key: IP + Hostname
-	assetKey := fmt.Sprintf("%s_%s", raw.Target.IP, discoveredHostname)
+	assetKey := raw.Target.IP
 	asset, exists := a.assets[assetKey]
 	if !exists {
 		asset = &DeviceAsset{
-			IP:       raw.Target.IP,
-			Hostname: discoveredHostname,
-			Name:     discoveredName,
-			TTL:      discoveredTTL,
-			IPv4:     ipv4List,
-			IPv6:     ipv6List,
-			Answers:  make([]string, 0),
-			Services: make(map[string]ServiceEntry),
+			IP:          raw.Target.IP,
+			Hostname:    discoveredHostname,
+			DefaultName: cleanDefaultName,
+			TTL:         discoveredTTL,
+			IPv4:        ipv4List,
+			IPv6:        ipv6List,
+			Answers:     make([]string, 0),
+			Services:    make(map[string]ServiceEntry),
+			ServiceKeys: make([]string, 0),
 		}
 		a.assets[assetKey] = asset
 	}
 
-	// Merge basic fields
-	if asset.Name == "" || asset.Name == asset.IP {
-		asset.Name = discoveredName
+	if asset.Hostname == "" || asset.Hostname == asset.IP {
+		asset.Hostname = discoveredHostname
+	}
+	if asset.DefaultName == "" || asset.DefaultName == asset.IP {
+		asset.DefaultName = cleanDefaultName
 	}
 	if asset.TTL == 0 && discoveredTTL > 0 {
 		asset.TTL = discoveredTTL
@@ -216,40 +252,35 @@ func (a *Aggregator) ProcessRawResponse(raw *probe.RawResponse) *DeviceAsset {
 		primaryIPv6 = asset.IPv6[0]
 	}
 
-	// Build & merge SRV services
+	// Process SRVs
 	for _, srv := range srvList {
 		svcName, proto := parseServiceNameAndProto(srv.Hdr.Name)
 		port := int(srv.Port)
 		if port == 0 {
+			port = DefaultPortForService(svcName)
+		}
+		if port == 0 {
 			port = raw.Target.Port
 		}
-		entryKey := fmt.Sprintf("%d/%s %s:", port, proto, svcName)
 
-		banner := ""
-		srvFullName := strings.TrimSuffix(srv.Hdr.Name, ".")
-		if b, ok := txtByService[srvFullName]; ok {
-			banner = b
-		} else {
-			for name, b := range txtByService {
-				if strings.Contains(srvFullName, name) || strings.Contains(name, srvFullName) {
-					banner = b
-					break
-				}
-			}
+		instName, svcType := extractInstanceAndService(srv.Hdr.Name)
+		serviceName := instName
+		if serviceName == "" {
+			serviceName = instanceNames[svcType]
+		}
+		if serviceName == "" {
+			serviceName = asset.DefaultName
 		}
 
-		targetHost := strings.TrimSuffix(srv.Target, ".")
-		if targetHost == "" {
-			targetHost = asset.Hostname
-		}
+		banner := getBanner(txtByService, srv.Hdr.Name, svcType)
 
-		asset.Services[entryKey] = ServiceEntry{
+		entry := ServiceEntry{
 			Port:     port,
 			Proto:    proto,
 			Service:  svcName,
-			FullName: srvFullName,
-			Target:   targetHost,
-			Name:     asset.Name,
+			FullName: strings.TrimSuffix(srv.Hdr.Name, "."),
+			Target:   asset.Hostname,
+			Name:     serviceName,
 			IPv4:     primaryIPv4,
 			IPv6:     primaryIPv6,
 			Hostname: asset.Hostname,
@@ -257,55 +288,116 @@ func (a *Aggregator) ProcessRawResponse(raw *probe.RawResponse) *DeviceAsset {
 			Banner:   banner,
 		}
 
-		if banner != "" {
-			if asset.Banner == "" {
-				asset.Banner = banner
-			} else if !strings.Contains(asset.Banner, banner) {
-				asset.Banner += "," + banner
-			}
+		tag := entry.FormatTag()
+		if _, exists := asset.Services[tag]; !exists {
+			asset.ServiceKeys = append(asset.ServiceKeys, tag)
 		}
+		asset.Services[tag] = entry
 	}
 
-	// Fallback services from PTR answers if no SRV records found
-	if len(asset.Services) == 0 {
-		for _, ptr := range asset.Answers {
-			svcName, proto := parseServiceNameAndProto(ptr)
-			if svcName != "" && svcName != "dns-sd" && svcName != "services" {
-				entryKey := fmt.Sprintf("%d/%s %s:", raw.Target.Port, proto, svcName)
-				banner := ""
-				if b, ok := txtByService[ptr]; ok {
-					banner = b
-				}
-				asset.Services[entryKey] = ServiceEntry{
-					Port:     raw.Target.Port,
-					Proto:    proto,
-					Service:  svcName,
-					FullName: ptr,
-					Target:   asset.Hostname,
-					Name:     asset.Name,
-					IPv4:     primaryIPv4,
-					IPv6:     primaryIPv6,
-					Hostname: asset.Hostname,
-					TTL:      asset.TTL,
-					Banner:   banner,
+	// Also ensure all PTR services exist in Services list (e.g. smb, workstation, device-info, afpovertcp)
+	for _, ptr := range asset.Answers {
+		svcName, proto := parseServiceNameAndProto(ptr)
+		if svcName == "" || svcName == "dns-sd" || svcName == "services" {
+			continue
+		}
+
+		port := DefaultPortForService(svcName)
+		if port == 0 && svcName != "device-info" {
+			port = raw.Target.Port
+		}
+
+		dummyEntry := ServiceEntry{
+			Port:    port,
+			Proto:   proto,
+			Service: svcName,
+		}
+		tag := dummyEntry.FormatTag()
+
+		if _, exists := asset.Services[tag]; !exists {
+			instName, svcType := extractInstanceAndService(ptr)
+			serviceName := instName
+			if serviceName == "" {
+				serviceName = instanceNames[svcType]
+			}
+			if serviceName == "" {
+				if svcName == "device-info" || svcName == "afpovertcp" {
+					if afpName, ok := instanceNames["afpovertcp"]; ok {
+						serviceName = afpName
+					} else {
+						serviceName = asset.DefaultName + "(AFP)"
+					}
+				} else {
+					serviceName = asset.DefaultName
 				}
 			}
+
+			banner := getBanner(txtByService, ptr, svcType)
+
+			entry := ServiceEntry{
+				Port:     port,
+				Proto:    proto,
+				Service:  svcName,
+				FullName: ptr,
+				Target:   asset.Hostname,
+				Name:     serviceName,
+				IPv4:     primaryIPv4,
+				IPv6:     primaryIPv6,
+				Hostname: asset.Hostname,
+				TTL:      asset.TTL,
+				Banner:   banner,
+			}
+
+			asset.ServiceKeys = append(asset.ServiceKeys, tag)
+			asset.Services[tag] = entry
 		}
 	}
 
 	return asset
 }
 
-// GetAllAssets returns a list of all aggregated device assets
+func getBanner(txtMap map[string]string, names ...string) string {
+	for _, name := range names {
+		clean := strings.TrimSuffix(name, ".")
+		if b, ok := txtMap[clean]; ok && b != "" {
+			return b
+		}
+	}
+	for _, name := range names {
+		clean := strings.TrimSuffix(name, ".")
+		for k, b := range txtMap {
+			if strings.Contains(k, clean) || strings.Contains(clean, k) {
+				return b
+			}
+		}
+	}
+	return ""
+}
+
 func (a *Aggregator) GetAllAssets() []*DeviceAsset {
 	list := make([]*DeviceAsset, 0, len(a.assets))
 	for _, asset := range a.assets {
 		list = append(list, asset)
 	}
-	sort.Slice(list, func(i, j int) bool {
-		return list[i].IP < list[j].IP
-	})
 	return list
+}
+
+func extractInstanceAndService(fullName string) (string, string) {
+	fullName = strings.TrimSuffix(fullName, ".")
+	tokens := strings.Split(fullName, ".")
+	var instParts []string
+	var svcType string
+	for _, t := range tokens {
+		if strings.HasPrefix(t, "_") {
+			if svcType == "" {
+				svcType = strings.TrimPrefix(t, "_")
+			}
+		} else if svcType == "" && t != "local" {
+			instParts = append(instParts, t)
+		}
+	}
+	inst := strings.Join(instParts, ".")
+	return inst, svcType
 }
 
 func parseServiceNameAndProto(name string) (string, string) {

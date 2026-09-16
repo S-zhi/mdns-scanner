@@ -23,7 +23,7 @@ func main() {
 	}
 	defer conn.Close()
 
-	fmt.Printf("[*] Mock mDNS Responder listening on 0.0.0.0:%d (Press Ctrl+C to stop)...\n", port)
+	fmt.Printf("[*] Mock mDNS Server running on port %d\n", port)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -33,7 +33,7 @@ func main() {
 		os.Exit(0)
 	}()
 
-	buf := make([]byte, 2048)
+	buf := make([]byte, 4096)
 	for {
 		n, addr, err := conn.ReadFrom(buf)
 		if err != nil {
@@ -49,44 +49,78 @@ func main() {
 		resp.SetReply(req)
 		resp.Authoritative = true
 
-		// Answers: PTR list
-		resp.Answer = append(resp.Answer, &dns.PTR{
-			Hdr: dns.RR_Header{Name: "_services._dns-sd._udp.local.", Rrtype: dns.TypePTR, Class: dns.ClassINET, Ttl: 120},
-			Ptr: "_http._tcp.local.",
+		// Answers PTR
+		ptrServices := []string{
+			"_workstation._tcp.local.",
+			"_http._tcp.local.",
+			"_smb._tcp.local.",
+			"_qdiscover._tcp.local.",
+			"_device-info._tcp.local.",
+			"_afpovertcp._tcp.local.",
+		}
+		for _, ptr := range ptrServices {
+			resp.Answer = append(resp.Answer, &dns.PTR{
+				Hdr: dns.RR_Header{Name: "_services._dns-sd._udp.local.", Rrtype: dns.TypePTR, Class: dns.ClassINET, Ttl: 10},
+				Ptr: ptr,
+			})
+		}
+
+		// SRV Records
+		resp.Extra = append(resp.Extra, &dns.SRV{
+			Hdr:    dns.RR_Header{Name: "slw-nas [24:5e:be:69:a3:13]._workstation._tcp.local.", Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 10},
+			Port:   9,
+			Target: "slw-nas.local.",
 		})
-		resp.Answer = append(resp.Answer, &dns.PTR{
-			Hdr: dns.RR_Header{Name: "_services._dns-sd._udp.local.", Rrtype: dns.TypePTR, Class: dns.ClassINET, Ttl: 120},
-			Ptr: "_qdiscover._tcp.local.",
+		resp.Extra = append(resp.Extra, &dns.SRV{
+			Hdr:    dns.RR_Header{Name: "slw-nas._http._tcp.local.", Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 10},
+			Port:   5000,
+			Target: "slw-nas.local.",
+		})
+		resp.Extra = append(resp.Extra, &dns.SRV{
+			Hdr:    dns.RR_Header{Name: "slw-nas._smb._tcp.local.", Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 10},
+			Port:   445,
+			Target: "slw-nas.local.",
+		})
+		resp.Extra = append(resp.Extra, &dns.SRV{
+			Hdr:    dns.RR_Header{Name: "slw-nas._qdiscover._tcp.local.", Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 10},
+			Port:   5000,
+			Target: "slw-nas.local.",
+		})
+		resp.Extra = append(resp.Extra, &dns.SRV{
+			Hdr:    dns.RR_Header{Name: "slw-nas(AFP)._afpovertcp._tcp.local.", Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 10},
+			Port:   548,
+			Target: "slw-nas.local.",
 		})
 
-		// Extra: SRV records
-		resp.Extra = append(resp.Extra, &dns.SRV{
-			Hdr:    dns.RR_Header{Name: "SynologyNAS._http._tcp.local.", Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 120},
-			Port:   5000,
-			Target: "synology-nas.local.",
-		})
-		resp.Extra = append(resp.Extra, &dns.SRV{
-			Hdr:    dns.RR_Header{Name: "SynologyNAS._qdiscover._tcp.local.", Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 120},
-			Port:   5000,
-			Target: "synology-nas.local.",
-		})
-
-		// Extra: TXT records (Deep Metadata Banner)
+		// TXT Records (Banners)
 		resp.Extra = append(resp.Extra, &dns.TXT{
-			Hdr: dns.RR_Header{Name: "SynologyNAS._http._tcp.local.", Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 120},
+			Hdr: dns.RR_Header{Name: "slw-nas._http._tcp.local.", Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 10},
+			Txt: []string{"path=/"},
+		})
+		resp.Extra = append(resp.Extra, &dns.TXT{
+			Hdr: dns.RR_Header{Name: "slw-nas._qdiscover._tcp.local.", Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 10},
 			Txt: []string{
-				"model=DS920+",
-				"version=7.2-64570",
-				"vendor=Synology",
-				"support_proto=http,https",
-				"mac=00:11:32:AA:BB:CC",
+				"accessType=https",
+				"accessPort=86",
+				"model=TS-X64",
+				"displayModel=TS-464C",
+				"fwVer=5.2.9",
+				"fwBuildNum=20260214",
 			},
 		})
+		resp.Extra = append(resp.Extra, &dns.TXT{
+			Hdr: dns.RR_Header{Name: "slw-nas(AFP)._device-info._tcp.local.", Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 10},
+			Txt: []string{"model=Xserve"},
+		})
 
-		// Extra: A and AAAA records
+		// A and AAAA Records
 		resp.Extra = append(resp.Extra, &dns.A{
-			Hdr: dns.RR_Header{Name: "synology-nas.local.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 120},
-			A:   net.ParseIP("127.0.0.1"),
+			Hdr: dns.RR_Header{Name: "slw-nas.local.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 10},
+			A:   net.ParseIP("192.168.1.50"),
+		})
+		resp.Extra = append(resp.Extra, &dns.AAAA{
+			Hdr:  dns.RR_Header{Name: "slw-nas.local.", Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 10},
+			AAAA: net.ParseIP("fe80::265e:beff:fe69:a313"),
 		})
 
 		wire, err := resp.Pack()

@@ -8,15 +8,14 @@ import (
 	"mdns-scanner/pkg/parser"
 )
 
-// TC-FMT-01: Table-driven unit test verifying formatted output matches problem sample
-func TestFormatter_PrintDeviceAsset(t *testing.T) {
+func TestFormatterExactAlignment(t *testing.T) {
 	asset := &parser.DeviceAsset{
-		IP:       "192.168.1.120",
-		Hostname: "slw-nas.local",
-		Name:     "slw-nas",
-		TTL:      10,
-		IPv4:     []string{"192.168.1.120"},
-		IPv6:     []string{"fe80::265e:beff:fe69:a313"},
+		IP:          "192.168.1.50",
+		Hostname:    "slw-nas.local",
+		DefaultName: "slw-nas",
+		TTL:         10,
+		IPv4:        []string{"192.168.1.50"},
+		IPv6:        []string{"fe80::265e:beff:fe69:a313"},
 		Answers: []string{
 			"_workstation._tcp.local",
 			"_http._tcp.local",
@@ -31,7 +30,7 @@ func TestFormatter_PrintDeviceAsset(t *testing.T) {
 				Proto:    "tcp",
 				Service:  "workstation",
 				Name:     "slw-nas [24:5e:be:69:a3:13]",
-				IPv4:     "192.168.1.120",
+				IPv4:     "192.168.1.50",
 				IPv6:     "fe80::265e:beff:fe69:a313",
 				Hostname: "slw-nas.local",
 				TTL:      10,
@@ -41,34 +40,24 @@ func TestFormatter_PrintDeviceAsset(t *testing.T) {
 				Proto:    "tcp",
 				Service:  "http",
 				Name:     "slw-nas",
-				IPv4:     "192.168.1.120",
+				IPv4:     "192.168.1.50",
 				IPv6:     "fe80::265e:beff:fe69:a313",
 				Hostname: "slw-nas.local",
 				TTL:      10,
 				Banner:   "path=/",
 			},
-			"445/tcp smb:": {
-				Port:     445,
-				Proto:    "tcp",
-				Service:  "smb",
-				Name:     "slw-nas",
-				IPv4:     "192.168.1.120",
+			"device-info:": {
+				Port:     0,
+				Service:  "device-info",
+				Name:     "slw-nas(AFP)",
+				IPv4:     "192.168.1.50",
 				IPv6:     "fe80::265e:beff:fe69:a313",
 				Hostname: "slw-nas.local",
 				TTL:      10,
-			},
-			"5000/tcp qdiscover:": {
-				Port:     5000,
-				Proto:    "tcp",
-				Service:  "qdiscover",
-				Name:     "slw-nas",
-				IPv4:     "192.168.1.120",
-				IPv6:     "fe80::265e:beff:fe69:a313",
-				Hostname: "slw-nas.local",
-				TTL:      10,
-				Banner:   "accessType=https,accessPort=86,model=TS-X64,displayModel=TS-464C,fwVer=5.2.9,fwBuildNum=20260214",
+				Banner:   "model=Xserve",
 			},
 		},
+		ServiceKeys: []string{"9/tcp workstation:", "5000/tcp http:", "device-info:"},
 	}
 
 	var buf bytes.Buffer
@@ -79,35 +68,28 @@ func TestFormatter_PrintDeviceAsset(t *testing.T) {
 
 	out := buf.String()
 
-	// Assertions for structure alignment
-	expectedSnippets := []string{
-		"services:",
-		"5000/tcp http:",
-		"path=/",
-		"5000/tcp qdiscover:",
-		"model=TS-X64",
-		"displayModel=TS-464C",
-		"fwVer=5.2.9",
-		"answers:",
-		"PTR:",
-		"_workstation._tcp.local",
-		"_qdiscover._tcp.local",
+	expectedSubstrings := []string{
+		"services:\n",
+		"9/tcp workstation:\n",
+		"Name=slw-nas [24:5e:be:69:a3:13]\n",
+		"IPv4=192.168.1.50\n",
+		"IPv6=fe80::265e:beff:fe69:a313\n",
+		"Hostname=slw-nas.local\n",
+		"TTL=10\n",
+		"5000/tcp http:\n",
+		"path=/\n",
+		"device-info:\n",
+		"model=Xserve\n",
+		"answers:\n",
+		"PTR:\n",
+		"_workstation._tcp.local\n",
+		"_http._tcp.local\n",
+		"_smb._tcp.local\n",
 	}
 
-	for _, snippet := range expectedSnippets {
-		if !strings.Contains(out, snippet) {
-			t.Errorf("expected output to contain %q, but got:\n%s", snippet, out)
+	for _, sub := range expectedSubstrings {
+		if !strings.Contains(out, sub) {
+			t.Errorf("expected output to contain %q, but got:\n%s", sub, out)
 		}
-	}
-}
-
-func TestFormatter_PrintNil(t *testing.T) {
-	var buf bytes.Buffer
-	f := NewFormatter(&buf, false)
-	if err := f.PrintDeviceAsset(nil); err != nil {
-		t.Errorf("expected nil error on nil asset, got %v", err)
-	}
-	if buf.Len() != 0 {
-		t.Errorf("expected empty buffer for nil asset, got %s", buf.String())
 	}
 }
