@@ -1,5 +1,10 @@
 # mdns-scanner
 
+<p align="left">
+  <b>English</b> |
+  <b><a href="README_zh.md">简体中文</a></b>
+</p>
+
 [![Go Report Card](https://goreportcard.com/badge/github.com/S-zhi/mdns-scanner)](https://goreportcard.com/report/github.com/S-zhi/mdns-scanner)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
